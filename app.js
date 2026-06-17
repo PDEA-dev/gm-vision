@@ -206,6 +206,9 @@ const SYSTEMS = [
   { id: "ordinal", label: "Ordinal", detail: "א=1 ת=22" },
   { id: "reduced", label: "Reduced", detail: "single digit" },
   { id: "sofit", label: "Sofit", detail: "finals 500-900" },
+  { id: "musafi", label: "Musafi", detail: "value + letters" },
+  { id: "kolel", label: "Kolel", detail: "value + words" },
+  { id: "perati", label: "Perati", detail: "squares" },
 ];
 
 const COLORS = {
@@ -223,6 +226,8 @@ let state = {
   resultFilter: "all",
   graphMode: "constellation",
   orbitShift: 0,
+  compareTarget: "אדני",
+  liveSearch: { status: "idle", query: "", results: [], error: "" },
 };
 
 const elements = {
@@ -347,8 +352,8 @@ function render() {
 function renderMetrics(model) {
   const metrics = [
     ["Absolute", gematria(model.word, "absolute")],
-    ["Ordinal", gematria(model.word, "ordinal")],
     ["Reduced", gematria(model.word, "reduced")],
+    ["Words", hebrewWords(model.word).length || 1],
     ["Milui", gematria(model.milui, "absolute")],
   ];
   elements.metricStrip.innerHTML = metrics.map(([label, value]) => `
@@ -426,7 +431,7 @@ function renderMilui(model) {
 
 function renderRelations(model) {
   elements.relationList.innerHTML = model.relations.slice(0, 6).map((item) => `
-    <button class="relation-row" type="button" data-word="${item.word}">
+    <button class="relation-row" type="button" data-word="${escapeHtml(item.word)}">
       <div class="relation-word">${item.word}</div>
       <div>
         <div class="relation-name">${item.translation}</div>
@@ -438,8 +443,14 @@ function renderRelations(model) {
 
   elements.relationList.querySelectorAll("[data-word]").forEach((button) => {
     button.addEventListener("click", () => {
-      elements.queryInput.value = button.dataset.word;
-      applySearch(button.dataset.word);
+      state.compareTarget = button.dataset.word;
+      renderSynthesis(buildModel(state.word));
+      renderSelected({
+        kind: "comparison",
+        label: `${state.word} ↔ ${button.dataset.word}`,
+        title: "Comparison ready",
+        description: `The active text stays ${state.word}. The comparison target is now ${button.dataset.word}. Use the Study synthesis card to test other words or phrases.`,
+      }, model, false);
     });
   });
 }
@@ -449,19 +460,219 @@ function renderSynthesis(model) {
   const factors = factorize(model.value);
   const strongest = model.relations.find((item) => item.word !== model.word);
   const reduced = reduceNumber(model.value);
+  const compareTarget = state.compareTarget || strongest?.word || "";
   const lines = [
     `${model.word} totals ${model.value} in ${labelForSystem(state.system)}. Its digit-root is ${reduced}, giving the search a compact numerical signature for quick comparison.`,
-    root ? `The visible root pattern is ${root}. Related appearances are weighted toward verses and words that share these root letters.` : "The word has a short form, so the app emphasizes letter anatomy and equal-value relationships.",
+    root ? `The visible root pattern is ${root}. Related appearances are weighted toward verses and words that share these root letters.` : "The text is short or phrase-like, so the app emphasizes letter anatomy, word totals, and equal-value relationships.",
     strongest ? `${strongest.word} shares or neighbors the same numeric field, suggesting a study path from ${model.word} toward ${strongest.translation}.` : "No equal-value match is in the local lexicon yet, so nearby values become the first study trail.",
-    `Factor pattern: ${factors.length ? factors.join(" x ") : "prime"}. The constellation uses this to set ring density and relation strength.`,
+    `Factor pattern: ${factors.length ? factors.join(" x ") : "prime"}. Treat this as a remez/signal, not a proof by itself.`,
   ];
-  elements.synthesis.innerHTML = lines.map((line) => `<p>${line}</p>`).join("");
+
+  elements.synthesis.innerHTML = `
+    ${renderComparisonBlock(model.word, compareTarget)}
+    <div class="synthesis-lines">
+      ${lines.map((line) => `<p>${line}</p>`).join("")}
+    </div>
+  `;
+
+  const compareForm = elements.synthesis.querySelector("#compareForm");
+  const compareInput = elements.synthesis.querySelector("#compareInput");
+  const clearButton = elements.synthesis.querySelector("#clearCompareButton");
+  const exploreButton = elements.synthesis.querySelector("#exploreCompareButton");
+  const swapButton = elements.synthesis.querySelector("#swapCompareButton");
+
+  compareForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    state.compareTarget = compareInput.value;
+    renderSynthesis(buildModel(state.word));
+  });
+
+  clearButton?.addEventListener("click", () => {
+    state.compareTarget = "";
+    renderSynthesis(buildModel(state.word));
+  });
+
+  exploreButton?.addEventListener("click", () => {
+    const next = resolveInput(state.compareTarget) || cleanHebrewInput(state.compareTarget);
+    if (!next) return;
+    const oldActive = state.word;
+    state.compareTarget = oldActive;
+    elements.queryInput.value = next;
+    applySearch(next);
+  });
+
+  swapButton?.addEventListener("click", () => {
+    const next = resolveInput(state.compareTarget) || cleanHebrewInput(state.compareTarget);
+    if (!next) return;
+    const oldActive = state.word;
+    state.compareTarget = oldActive;
+    elements.queryInput.value = next;
+    applySearch(next);
+  });
+}
+
+function renderComparisonBlock(activeRaw, compareRaw) {
+  const active = comparisonProfile(activeRaw);
+  const compared = comparisonProfile(compareRaw || "");
+  const hasCompared = Boolean(compared.clean);
+  const matches = hasCompared ? comparisonMatches(active, compared) : [];
+  const diff = hasCompared ? Math.abs(active.systems.absolute - compared.systems.absolute) : 0;
+  const matchText = !hasCompared
+    ? "Type or click a word to compare against the active text."
+    : matches.length
+      ? `Shared systems: ${matches.join(", ")}.`
+      : `No exact system match yet. Absolute difference: ${diff}.`;
+  const tone = hasCompared && matches.length ? "match" : "open";
+  const comparedDisplay = compared.display || "";
+
+  return `
+    <section class="compare-card ${tone}" aria-label="Smart gematria comparison">
+      <div class="compare-heading">
+        <div>
+          <span class="node-kind">smart comparison</span>
+          <h3>Compare words or full Hebrew phrases</h3>
+        </div>
+        <span class="compare-badge">${hasCompared ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : "ready"}</span>
+      </div>
+
+      <form class="compare-form" id="compareForm">
+        <label for="compareInput">Active: <strong dir="rtl">${escapeHtml(active.display)}</strong></label>
+        <div class="compare-input-row">
+          <input id="compareInput" type="text" dir="auto" value="${escapeHtml(comparedDisplay)}" placeholder="אדני, שלום, or a Hebrew sentence" autocomplete="off" spellcheck="false" />
+          <button type="submit">Compare</button>
+        </div>
+      </form>
+
+      <div class="compare-verdict">
+        <strong>${matchText}</strong>
+        <span>Same-value findings are a study trail. They become meaningful when supported by text, context, and mesorah.</span>
+      </div>
+
+      ${hasCompared ? `
+        <div class="compare-table" role="table" aria-label="Gematria comparison table">
+          ${comparisonRows(active, compared).map((row) => `
+            <div class="compare-row ${row.equal ? "equal" : ""}" role="row">
+              <span>${row.label}</span>
+              <strong>${row.left}</strong>
+              <em>${row.equal ? "=" : "↔"}</em>
+              <strong>${row.right}</strong>
+            </div>
+          `).join("")}
+        </div>
+
+        <details class="word-breakdown" open>
+          <summary>Word-by-word breakdown</summary>
+          <div class="word-columns">
+            ${renderWordBreakdown(active)}
+            ${renderWordBreakdown(compared)}
+          </div>
+        </details>
+
+        <div class="compare-actions">
+          <button class="ghost-button" id="exploreCompareButton" type="button">Make compared text active</button>
+          <button class="ghost-button" id="swapCompareButton" type="button">Swap active and compared</button>
+          <button class="ghost-button" id="clearCompareButton" type="button">Clear comparison</button>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function comparisonProfile(raw) {
+  const display = resolveInput(raw) || cleanHebrewInput(raw);
+  const clean = stripNonHebrew(display);
+  const words = hebrewWords(display);
+  const milui = fillWord(display);
+  return {
+    raw,
+    display,
+    clean,
+    words,
+    systems: {
+      absolute: gematria(display, "absolute"),
+      ordinal: gematria(display, "ordinal"),
+      reduced: gematria(display, "reduced"),
+      sofit: gematria(display, "sofit"),
+      musafi: gematria(display, "musafi"),
+      kolel: gematria(display, "kolel"),
+      perati: gematria(display, "perati"),
+      milui: gematria(milui, "absolute"),
+    },
+  };
+}
+
+function comparisonRows(left, right) {
+  return [
+    ["Absolute / Mispar Hechrechi", "absolute"],
+    ["Ordinal / Mispar Siduri", "ordinal"],
+    ["Reduced / Mispar Katan", "reduced"],
+    ["Sofit / final-letter value", "sofit"],
+    ["Musafi / value + letters", "musafi"],
+    ["Kolel / value + words", "kolel"],
+    ["Perati / squared letters", "perati"],
+    ["Milouï / letter names", "milui"],
+  ].map(([label, key]) => ({
+    label,
+    left: left.systems[key],
+    right: right.systems[key],
+    equal: left.systems[key] === right.systems[key],
+  }));
+}
+
+function comparisonMatches(left, right) {
+  return comparisonRows(left, right).filter((row) => row.equal).map((row) => row.label.split(" /")[0]);
+}
+
+function renderWordBreakdown(profile) {
+  const rows = profile.words.length ? profile.words : [profile.display].filter(Boolean);
+  return `
+    <div class="word-breakdown-column">
+      <strong dir="rtl">${escapeHtml(profile.display)}</strong>
+      ${rows.map((word) => `<span><b dir="rtl">${escapeHtml(word)}</b> ${gematria(word, "absolute")}</span>`).join("")}
+    </div>
+  `;
 }
 
 function renderResults(model) {
   const filtered = model.results.filter((item) => state.resultFilter === "all" || item.kind === state.resultFilter);
-  elements.resultsSummary.textContent = `${filtered.length} verified Sefaria source${filtered.length === 1 ? "" : "s"} for ${model.word}. ${TANAKH_BOOKS_24.length} Tanakh-book corpus target.`;
-  elements.resultList.innerHTML = filtered.map((item) => {
+  const live = state.liveSearch;
+  const liveActive = live.query && normalizeHebrew(live.query) === normalizeHebrew(model.word);
+  const liveResults = liveActive ? live.results : [];
+  const liveStatus = liveActive ? live.status : "idle";
+  elements.resultsSummary.textContent = `${filtered.length} curated source${filtered.length === 1 ? "" : "s"} plus ${liveResults.length} live Sefaria result${liveResults.length === 1 ? "" : "s"} for ${model.word}. ${TANAKH_BOOKS_24.length} Tanakh-book corpus target.`;
+
+  const liveBox = `
+    <article class="live-search-box">
+      <div>
+        <strong>Live Sefaria lookup</strong>
+        <p>Search the live Sefaria library for the active Hebrew word or phrase. Curated local verses remain below as a stable fallback.</p>
+      </div>
+      <button class="ghost-button" id="liveSefariaButton" type="button" ${liveStatus === "loading" ? "disabled" : ""}>
+        ${liveStatus === "loading" ? "Searching…" : "Search live"}
+      </button>
+      ${liveStatus === "error" ? `<p class="live-error">${escapeHtml(live.error || "Live search is unavailable right now.")}</p>` : ""}
+    </article>
+  `;
+
+  const liveMarkup = liveResults.map((item) => `
+    <article class="result-row live-result">
+      <div>
+        <div class="result-ref">${escapeHtml(item.ref)}</div>
+        <div class="result-meta">Live Sefaria</div>
+      </div>
+      <div class="result-text">
+        <div class="result-hebrew" dir="rtl">${item.hebrew || ""}</div>
+        <div class="result-english">${escapeHtml(item.english || "Open Sefaria for full text and versions.")}</div>
+      </div>
+      <div class="result-source">
+        <a class="result-source-link" href="${item.sourceUrl}" target="_blank" rel="noreferrer">Open Sefaria</a>
+        <span>${escapeHtml(item.path || "Sefaria library")}</span>
+        <span class="result-kind">live</span>
+      </div>
+    </article>
+  `).join("");
+
+  const curatedMarkup = filtered.map((item) => {
     const hebrew = highlightTerms(item.hebrew, model.matchTerms);
     return `
       <article class="result-row">
@@ -480,7 +691,82 @@ function renderResults(model) {
         </div>
       </article>
     `;
-  }).join("") || `<article class="result-row"><div class="result-ref">No verified source yet</div><div class="result-english">This prototype only displays Tanakh rows with an explicit Sefaria URL. Try ברכה, אדני, peace, blessing, light, love, truth, or Torah.</div><div class="result-source">No invented pasuk</div></article>`;
+  }).join("") || `<article class="result-row"><div class="result-ref">No curated source yet</div><div class="result-english">This prototype only displays curated Tanakh rows with an explicit Sefaria URL. Try ברכה, אדני, peace, blessing, light, love, truth, or Torah. You can also run live search above.</div><div class="result-source">No invented pasuk</div></article>`;
+
+  elements.resultList.innerHTML = liveBox + liveMarkup + curatedMarkup;
+  elements.resultList.querySelector("#liveSefariaButton")?.addEventListener("click", () => runLiveSefariaSearch(model.word));
+}
+
+async function runLiveSefariaSearch(rawQuery) {
+  const query = cleanHebrewInput(rawQuery) || stripNonHebrew(rawQuery);
+  if (!query) return;
+  state.liveSearch = { status: "loading", query, results: [], error: "" };
+  renderResults(buildModel(state.word));
+
+  try {
+    const response = await fetch("https://www.sefaria.org/api/search-wrapper", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        query,
+        type: "text",
+        field: "naive_lemmatizer",
+        source_proj: true,
+        filters: ["Tanakh"],
+        filter_fields: ["path"],
+        slop: 2,
+        size: 8,
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Sefaria returned ${response.status}`);
+    const data = await response.json();
+    const results = normalizeSefariaResults(data).slice(0, 8);
+    state.liveSearch = { status: "done", query, results, error: "" };
+  } catch (error) {
+    state.liveSearch = {
+      status: "error",
+      query,
+      results: [],
+      error: "Live search did not respond. The curated sources below still work, and you can try again later.",
+    };
+  }
+
+  renderResults(buildModel(state.word));
+}
+
+function normalizeSefariaResults(data) {
+  const hits = data?.hits?.hits || data?.hits || data?.results || [];
+  return hits.map((hit) => {
+    const source = hit?._source || hit?.source || hit || {};
+    const ref = source.ref || hit.ref || source.title || source.heRef || "Sefaria result";
+    const highlight = hit.highlight || {};
+    const hebrewSnippet = firstHighlight(highlight) || source.he || source.content || source.exact || "";
+    const englishSnippet = source.text || source.en || source.versionTitle || "";
+    return {
+      ref,
+      hebrew: sanitizeSefariaHtml(hebrewSnippet),
+      english: stripHtml(Array.isArray(englishSnippet) ? englishSnippet.join(" ") : englishSnippet).slice(0, 220),
+      path: Array.isArray(source.path) ? source.path.join(" › ") : source.path,
+      sourceUrl: `https://www.sefaria.org/${encodeURIComponent(String(ref).replace(/\s+/g, "."))}`,
+    };
+  }).filter((item) => item.ref);
+}
+
+function firstHighlight(highlight) {
+  const values = Object.values(highlight || {}).flat();
+  return values.find(Boolean) || "";
+}
+
+function sanitizeSefariaHtml(value) {
+  return String(Array.isArray(value) ? value.join(" ") : value || "")
+    .replace(/<em>/g, "<mark>")
+    .replace(/<\/em>/g, "</mark>")
+    .replace(/<(?!\/?mark\b)[^>]+>/g, "");
+}
+
+function stripHtml(value) {
+  return String(value || "").replace(/<[^>]+>/g, "");
 }
 
 function renderConstellation(model) {
@@ -778,16 +1064,37 @@ function verseMatches(word, terms, value) {
 function resolveInput(raw) {
   const trimmed = String(raw || "").trim().toLowerCase();
   if (!trimmed) return "";
-  if (/[\u0590-\u05ff]/.test(trimmed)) return stripNonHebrew(trimmed);
-  return ENGLISH_TO_HEBREW[trimmed] || ENGLISH_TO_HEBREW[trimmed.replace(/\s+/g, " ")] || "";
+  if (/[\u0590-\u05ff]/.test(trimmed)) return cleanHebrewInput(trimmed);
+  if (ENGLISH_TO_HEBREW[trimmed]) return ENGLISH_TO_HEBREW[trimmed];
+  const phrase = trimmed.replace(/\s+/g, " ");
+  if (ENGLISH_TO_HEBREW[phrase]) return ENGLISH_TO_HEBREW[phrase];
+  const mappedWords = phrase.split(/[\s,.;:!?/]+/).map((word) => ENGLISH_TO_HEBREW[word]).filter(Boolean);
+  return mappedWords.length ? mappedWords.join(" ") : "";
+}
+
+function cleanHebrewInput(value) {
+  return hebrewWords(value).join(" ");
+}
+
+function hebrewWords(value) {
+  const normalized = String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0591-\u05C7]/g, "")
+    .replace(/[׳']/g, "")
+    .replace(/[״"]/g, "");
+  return normalized.match(/[א-תךםןףץ]+/g) || [];
 }
 
 function stripNonHebrew(value) {
-  return [...value].filter((char) => LETTERS[char] || /\s/.test(char)).join("").replace(/\s+/g, "");
+  return hebrewWords(value).join("");
 }
 
 function gematria(word, system = "absolute") {
-  return [...stripNonHebrew(word)].reduce((sum, letter) => sum + valueForLetter(letter, system), 0);
+  const clean = stripNonHebrew(word);
+  const letters = [...clean];
+  if (system === "musafi") return gematria(clean, "absolute") + letters.length;
+  if (system === "kolel") return gematria(clean, "absolute") + Math.max(1, hebrewWords(word).length);
+  return letters.reduce((sum, letter) => sum + valueForLetter(letter, system), 0);
 }
 
 function valueForLetter(letter, system) {
@@ -796,6 +1103,7 @@ function valueForLetter(letter, system) {
   if (system === "ordinal") return info.ordinal;
   if (system === "reduced") return info.reduced;
   if (system === "sofit" && info.sofit) return info.sofit;
+  if (system === "perati") return info.absolute * info.absolute;
   return info.absolute;
 }
 
